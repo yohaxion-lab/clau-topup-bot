@@ -4,11 +4,6 @@
 ║        CLAU TOP UP — TELEGRAM BOT        ║
 ║     Single-file, fully self-contained    ║
 ╚══════════════════════════════════════════╝
-REQUIREMENTS:
-    pip install python-telegram-bot==20.7 aiosqlite
-
-RUN:
-    python bot.py
 """
 
 import asyncio
@@ -18,6 +13,8 @@ import aiosqlite
 import os
 import re
 from datetime import datetime, timedelta
+from flask import Flask
+import threading
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -49,6 +46,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── CONVERSATION STATES ──────────────────────────────────────────────────────
+# FIXED: Changed from range(20) to range(19) because we have 19 states
 
 (
     # Order flow
@@ -65,7 +63,7 @@ log = logging.getLogger(__name__)
     SET_FIELD, SET_VALUE,
     # Admin: search
     SEARCH_INPUT,
-) = range(20)
+) = range(19)  # ← FIXED: was range(20)
 
 # ─── DATABASE ─────────────────────────────────────────────────────────────────
 
@@ -137,8 +135,6 @@ async def db_init():
         row = await count.fetchone()
         if row[0] == 0:
             products = [
-                # (category, label, amount, price_etb, sort_order)
-                # Telegram Stars
                 ("stars", "⭐ 50 Stars",    50,   190,   1),
                 ("stars", "⭐ 100 Stars",   100,  370,   2),
                 ("stars", "⭐ 250 Stars",   250,  875,   3),
@@ -148,12 +144,10 @@ async def db_init():
                 ("stars", "⭐ 1000 Stars",  1000, 3300,  7),
                 ("stars", "⭐ 1500 Stars",  1500, 4800,  8),
                 ("stars", "⭐ 2500 Stars",  2500, 8000,  9),
-                # Telegram Premium
                 ("premium", "🌟 Premium 1 Month",   1,  700,  1),
                 ("premium", "🌟 Premium 3 Months",  3,  2500, 2),
                 ("premium", "🌟 Premium 6 Months",  6,  3500, 3),
                 ("premium", "🌟 Premium 12 Months", 12, 5900, 4),
-                # TikTok Coins
                 ("tiktok", "🪙 30 TikTok Coins",    30,   100,   1),
                 ("tiktok", "🪙 50 TikTok Coins",    50,   150,   2),
                 ("tiktok", "🪙 100 TikTok Coins",   100,  280,   3),
@@ -166,7 +160,6 @@ async def db_init():
                 ("tiktok", "🪙 5000 TikTok Coins",  5000, 11500, 10),
                 ("tiktok", "🪙 7000 TikTok Coins",  7000, 15750, 11),
                 ("tiktok", "🪙 10000 TikTok Coins", 10000,22000, 12),
-                # Free Fire
                 ("freefire", "💎 100+10 Diamonds",  110,  200,  1),
                 ("freefire", "💎 210+21 Diamonds",  231,  400,  2),
                 ("freefire", "💎 320+21 Diamonds",  341,  600,  3),
@@ -174,7 +167,6 @@ async def db_init():
                 ("freefire", "🧧 Weekly Pass (450💎)", 450, 450, 5),
                 ("freefire", "🧧 Monthly Pass (2600💎)", 2600, 2200, 6),
                 ("freefire", "🧧 Level Up Pass",    0,    950,  7),
-                # PUBG UC
                 ("pubg", "🎮 30 UC",   30,   120,  1),
                 ("pubg", "🎮 60 UC",   60,   180,  2),
                 ("pubg", "🎮 120 UC",  120,  395,  3),
@@ -295,7 +287,6 @@ async def db_update_order_status(order_id, status, extra=None):
                 "UPDATE orders SET status=?,delivered_at=?,admin_note=? WHERE order_id=?",
                 (status, now, note, order_id)
             )
-            # update user stats
             cur = await db.execute("SELECT user_id,amount_due FROM orders WHERE order_id=?", (order_id,))
             row = await cur.fetchone()
             if row:
@@ -384,18 +375,18 @@ async def db_get_stats():
         stats["total_users"] = (await cur.fetchone())[0]
         cur = await db.execute("SELECT COUNT(*),SUM(amount_due) FROM orders WHERE status='completed'")
         r = await cur.fetchone()
-        stats["total_orders"] = r[0]
+        stats["total_orders"] = r[0] or 0
         stats["total_revenue"] = r[1] or 0
         cur = await db.execute(f"SELECT COUNT(*),SUM(amount_due) FROM orders WHERE status='completed' AND created_at LIKE '{today}%'")
         r = await cur.fetchone()
-        stats["today_orders"] = r[0]
+        stats["today_orders"] = r[0] or 0
         stats["today_revenue"] = r[1] or 0
         cur = await db.execute(f"SELECT COUNT(*),SUM(amount_due) FROM orders WHERE status='completed' AND created_at LIKE '{month}%'")
         r = await cur.fetchone()
-        stats["month_orders"] = r[0]
+        stats["month_orders"] = r[0] or 0
         stats["month_revenue"] = r[1] or 0
         cur = await db.execute("SELECT COUNT(*) FROM orders WHERE status='confirming'")
-        stats["pending"] = (await cur.fetchone())[0]
+        stats["pending"] = (await cur.fetchone())[0] or 0
         return stats
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -582,7 +573,6 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("Product not found.", show_alert=True)
         return ConversationHandler.END
 
-    # One active order check
     active = await db_user_active_order(q.from_user.id)
     if active:
         await q.edit_message_text(
@@ -654,7 +644,6 @@ async def cb_confirm_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_GAME_ID
 
-    # Show payment methods
     methods = await db_get_payment_methods()
     if not methods:
         await q.edit_message_text(
@@ -681,7 +670,6 @@ async def cb_pay_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("Method not found.", show_alert=True)
         return ST_PAY_METHOD
 
-    # method: (method_id, name, account, account_name, instructions, is_active)
     context.user_data["order_pm"] = mid
     context.user_data["order_pm_name"] = method[1]
 
@@ -705,11 +693,9 @@ async def cb_pay_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"ℹ️ {instructions}"
     )
 
-    # Create order in DB
     await db_create_order(order_id, q.from_user.id, context.user_data["order_pid"],
                           label, gid, mid, price)
 
-    # Schedule expiry
     context.job_queue.run_once(
         expire_order,
         when=ORDER_EXPIRY * 60,
@@ -730,7 +716,6 @@ async def cb_pay_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_i_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    mid = context.user_data.get("order_pm", "telebirr")
     await q.edit_message_text(
         "📸 *Payment Proof Required*\n\n"
         "Please send a *screenshot* of your payment receipt as an image.\n\n"
@@ -748,7 +733,6 @@ async def recv_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Session expired. Please start a new order.")
         return ConversationHandler.END
 
-    # Accept photo or document
     proof = None
     if update.message.photo:
         proof = update.message.photo[-1].file_id
@@ -758,7 +742,6 @@ async def recv_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Please send an *image* (screenshot) of your payment.", parse_mode=ParseMode.MARKDOWN)
         return ST_PROOF
 
-    # Duplicate check
     if await db_proof_used(proof):
         await update.message.reply_text("⚠️ This screenshot has already been used. Please send a new one.")
         return ST_PROOF
@@ -782,7 +765,6 @@ async def recv_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 My Orders", callback_data="my_orders")]])
     )
 
-    # Notify all admins
     uname = f"@{user.username}" if user.username else user.full_name
     alert = (
         f"🆕 *NEW ORDER — Action Required*\n"
@@ -803,7 +785,6 @@ async def recv_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_message(admin_id, alert, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_kb)
-            # Forward screenshot
             await context.bot.send_photo(admin_id, proof, caption=f"📸 Proof for {order_id}")
         except Exception as e:
             log.warning(f"Could not notify admin {admin_id}: {e}")
@@ -878,7 +859,7 @@ async def cb_admin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("🚫 Unauthorized", show_alert=True)
         return
     await q.answer()
-    data = q.data  # adm_confirm_ORDERID | adm_reject_ORDERID | adm_refund_ORDERID
+    data = q.data
 
     parts  = data.split("_", 2)
     action = parts[1]
@@ -890,7 +871,6 @@ async def cb_admin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id     = order[1]
-    label       = order[4] if len(order) > 4 else order[3]
     product_label = order[3]
     game_id     = order[4]
     amount_due  = order[6]
@@ -950,7 +930,7 @@ async def cb_admin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        return  # Silently ignore
+        return
     await update.message.reply_text(
         f"🔐 *{STORE_NAME} — Admin Panel*",
         parse_mode=ParseMode.MARKDOWN,
@@ -976,7 +956,6 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     data = q.data
 
-    # ── Pending orders ────────────────────────────────────────────────
     if data == "adm_pending":
         orders = await db_get_pending_orders()
         if not orders:
@@ -998,7 +977,6 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data="adm_back")])
         await q.edit_message_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))
 
-    # ── Stats ─────────────────────────────────────────────────────────
     elif data == "adm_stats":
         s = await db_get_stats()
         text = (
@@ -1016,7 +994,6 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="adm_back")]]))
 
-    # ── Products ──────────────────────────────────────────────────────
     elif data == "adm_products":
         products = await db_get_all_products()
         cat_groups = {}
@@ -1034,7 +1011,6 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="adm_back")]]))
 
-    # ── Payments ──────────────────────────────────────────────────────
     elif data == "adm_payments":
         methods = await db_get_payment_methods()
         lines = ["💳 *Payment Methods*\n━━━━━━━━━━━━━━━━━━━━"]
@@ -1044,7 +1020,6 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="adm_back")]]))
 
-    # ── Users ─────────────────────────────────────────────────────────
     elif data == "adm_users":
         users = await db_get_all_users(limit=20)
         lines = ["👥 *Users (last 20)*\n━━━━━━━━━━━━━━━━━━━━"]
@@ -1056,14 +1031,12 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="adm_back")]]))
 
-    # ── Broadcast ─────────────────────────────────────────────────────
     elif data == "adm_broadcast":
         await q.edit_message_text(
             "📣 *Broadcast*\n\nUse the command:\n`/broadcast <your message>`\n\nThis will send your message to ALL users.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="adm_back")]]))
 
-    # ── Settings ──────────────────────────────────────────────────────
     elif data == "adm_settings":
         welcome = await db_get_setting("welcome_msg") or ""
         support = await db_get_setting("support") or ""
@@ -1236,7 +1209,6 @@ async def cmd_setexpiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Order expiry set to {context.args[0]} minutes.")
 
 async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: look up any order by ID"""
     if not is_admin(update.effective_user.id): return
     if not context.args:
         await update.message.reply_text("Usage: `/order <ORDER_ID>`", parse_mode=ParseMode.MARKDOWN); return
@@ -1245,7 +1217,6 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not order:
         await update.message.reply_text("⚠️ Order not found.")
         return
-    # columns: order_id,user_id,product_id,product_label,game_id,payment_method,amount_due,payment_proof,status,created_at,...
     text = (
         f"🔍 *Order Details*\n━━━━━━━━━━━━━━━━━━━━\n"
         f"🔖 ID: `{order[0]}`\n"
@@ -1309,6 +1280,21 @@ async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Open Store", callback_data="main_menu")]])
     )
 
+# ─── WEB SERVER FOR RAILWAY ──────────────────────────────────────────────────
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "✅ Bot is running!"
+
+@web_app.route('/health')
+def health():
+    return "OK", 200
+
+def run_web():
+    port = int(os.environ.get('PORT', 8080))
+    web_app.run(host='0.0.0.0', port=port)
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 async def post_init(app):
@@ -1316,6 +1302,9 @@ async def post_init(app):
     log.info("✅ Database initialized")
 
 def main():
+    # Start web server for Railway
+    threading.Thread(target=run_web, daemon=True).start()
+    
     app = (
         Application.builder()
         .token(BOT_TOKEN)
